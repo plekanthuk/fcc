@@ -125,6 +125,11 @@ def parse_grant_html(html_text):
     # width=65% align=center, not full width) that fccid.io's own mirror
     # preserves too; our CSS supplies fonts/spacing/borders on top.
     body = re.sub(r'\s+(class|style|bgcolor|background|border|cols)="[^"]*"', '', body, flags=re.I)
+    # FCC's source puts a bare <br> between every table as a spacing hint
+    # for its own (stripped) stylesheet; combined with our own table margin
+    # that doubles up into a large gap (most visible right after "By:").
+    # Our CSS already provides consistent spacing, so drop these.
+    body = re.sub(r'</table>\s*<br\s*/?>\s*(?=<table)', '</table>', body, flags=re.I)
     return body.strip()
 
 
