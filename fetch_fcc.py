@@ -273,9 +273,14 @@ def push_to_wp(wp_url: str, api_key: str,
     if scan_request_id:
         payload["scan_request_id"] = scan_request_id
 
-    resp = wp_requests.post(
-        endpoint, json=payload, headers={"X-FCC-Api-Key": api_key}, timeout=120,
-    )
+    # nginx на цьому хостингу блокує запити з UA "python-requests" (403
+    # ще до PHP) — тому видаємо себе за звичайний браузер.
+    headers = {
+        "X-FCC-Api-Key": api_key,
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+    }
+    resp = wp_requests.post(endpoint, json=payload, headers=headers, timeout=120)
     resp.raise_for_status()
     return resp.json()
 
