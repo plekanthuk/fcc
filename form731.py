@@ -92,7 +92,29 @@ def parse_application_info(text):
             })
     info['equipment_specs'] = specs
 
+    info['section_5301_certification'] = span_value(
+        sections.get('SECTION 5301 (ANTI-DRUG ABUSE) CERTIFICATION', ''),
+        'Does the applicant or authorized agent so certify')
+    info['kdb_inquiry'] = span_value(
+        sections.get('Related OET KnowledgeDataBase Inquiry', ''),
+        'Is there a KDB inquiry associated with this application')
+
     return info
+
+
+def parse_grant_text(html_text):
+    """Tcb731GrantForm.cfm?mode=COPY -> the rendered grant certificate,
+    matching fccid.io's "Grants" section. Returns cleaned plain text
+    (line breaks preserved, tags stripped)."""
+    m = re.search(r'<body[^>]*>(.*?)</body>', html_text, re.S | re.I)
+    body = m.group(1) if m else html_text
+    body = re.sub(r'<script.*?</script>', ' ', body, flags=re.S | re.I)
+    body = re.sub(r'<style.*?</style>', ' ', body, flags=re.S | re.I)
+    body = re.sub(r'<(br|/tr|/p|/div)[^>]*>', '\n', body, flags=re.I)
+    body = html.unescape(re.sub(r'<[^>]+>', ' ', body))
+    lines = [re.sub(r'[ \t]+', ' ', ln).strip() for ln in body.splitlines()]
+    lines = [ln for ln in lines if ln]
+    return '\n'.join(lines)
 
 
 if __name__ == '__main__':

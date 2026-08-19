@@ -34,6 +34,7 @@ import form731
 
 SEARCH_URL = "https://apps.fcc.gov/oetcf/eas/reports/GenericSearchResult.cfm?RequestTimeout=500"
 EXHIBITS_URL = "https://apps.fcc.gov/oetcf/eas/reports/ViewExhibitReport.cfm"
+GRANT_FORM_URL = "https://apps.fcc.gov/oetcf/tcb/reports/Tcb731GrantForm.cfm"
 IMPERSONATE = "chrome"
 
 BASE_FIELDS = {
@@ -282,11 +283,26 @@ def enrich_record(fcc_id: str, application_id: str) -> dict:
         )
         form_resp.raise_for_status()
         info = form731.parse_application_info(form_resp.text)
+        info["application_id"] = application_id
         result["application_info"] = info
         result["equipment_class"] = info.get("equipment_class") or None
         result["device_description"] = info.get("device_description") or None
     except Exception as e:
         print(f"[enrich] {fcc_id} form731 failed: {type(e).__name__}: {e}", file=sys.stderr)
+
+    try:
+        grant_resp = fcc_requests.get(
+            GRANT_FORM_URL,
+            params={"mode": "COPY", "RequestTimeout": "500", "tcb_code": "",
+                    "application_id": application_id, "fcc_id": fcc_id},
+            impersonate=IMPERSONATE, timeout=45,
+        )
+        grant_resp.raise_for_status()
+        if result["application_info"] is None:
+            result["application_info"] = {}
+        result["application_info"]["grant_text"] = form731.parse_grant_text(grant_resp.text)
+    except Exception as e:
+        print(f"[enrich] {fcc_id} grant text failed: {type(e).__name__}: {e}", file=sys.stderr)
 
     return result
 
