@@ -13,13 +13,11 @@ FCC EAS сканер -> надсилає нормалізовані записи
     python fetch_fcc.py --date-from 2026-08-01 --date-to 2026-08-19 --scan-type manual --enrich
 
 Потрібні змінні середовища (у GitHub Actions — секрети репозиторію):
-    WP_URL            напр. https://example.com
-    WP_USER           WordPress-логін (adminlmteam)
-    WP_APP_PASSWORD   Application Password (з пробілами, у форматі "xxxx xxxx ...")
+    WP_URL      напр. https://example.com
+    WP_API_KEY  значення поля "X-FCC-Api-Key" з вкладки Scan в адмінці плагіна
 """
 
 import argparse
-import html
 import os
 import re
 import sys
@@ -32,8 +30,9 @@ import requests as wp_requests
 from bs4 import BeautifulSoup
 from curl_cffi import requests as fcc_requests
 
+import form731
+
 SEARCH_URL = "https://apps.fcc.gov/oetcf/eas/reports/GenericSearchResult.cfm?RequestTimeout=500"
-GRANT_FORM_URL = "https://apps.fcc.gov/oetcf/tcb/reports/Tcb731GrantForm.cfm"
 EXHIBITS_URL = "https://apps.fcc.gov/oetcf/eas/reports/ViewExhibitReport.cfm"
 IMPERSONATE = "chrome"
 
@@ -178,64 +177,114 @@ def group_by_fcc_id(rows: list[dict]) -> dict:
 # Збагачення (Equipment Class / Device Description + список документів)
 # ---------------------------------------------------------------------------
 
+SUMMARY_URL = "https://apps.fcc.gov/oetcf/eas/reports/ViewExhibitReport.cfm"
+FORM731_URL = "https://apps.fcc.gov/tcb/GetTcb731Report.do"
+
+
+def _fetch_exhibit_links(fcc_id: str, application_id: str) -> dict:
+    """mode=Exhibits: only the documents that are actually downloadable right
+    now. Keyed by lowercased title, since this view has no stable id we can
+    join on with the Summary view other than the description text."""
+    links = {}
+    resp = fcc_requests.get(
+        EXHIBITS_URL,
+        params={"mode": "Exhibits", "RequestTimeout": "500", "calledFromFrame": "N",
+                "application_id": application_id, "fcc_id": fcc_id},
+        impersonate=IMPERSONATE, timeout=45,
+    )
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    tbody = soup.find(id="offTblBdy")
+    if not tbody:
+        return links
+    for tr in tbody.find_all("tr", recursive=False):
+        cells = tr.find_all("td", recursive=False)
+        if len(cells) < 6:
+            continue
+        link = cells[1].find("a")
+        if not link or not link.get("href"):
+            continue
+        m = re.search(r"[?&]id=(\d+)", link["href"])
+        if not m:
+            continue
+        title = link.get_text(strip=True)
+        href = link["href"]
+        links[title.lower()] = {
+            "attachment_id": m.group(1),
+            "download_url": "https://apps.fcc.gov" + href if href.startswith("/") else href,
+        }
+    return links
+
+
+def _fetch_exhibit_summary(fcc_id: str, application_id: str) -> list[dict]:
+    """mode=Sum: the FULL list including confidential/embargoed documents
+    that have no download link yet (fccid.io shows these as "Metadata only").
+    Columns: (blank), Exhibit Type, File Type, File Size, Description,
+    Submission Date, Permanent Confidential, Short-Term Confidential,
+    Supercede, Date Available."""
+    rows = []
+    resp = fcc_requests.get(
+        SUMMARY_URL,
+        params={"mode": "Sum", "calledFromFrame": "N", "RequestTimeout": "500",
+                "application_id": application_id, "fcc_id": fcc_id},
+        impersonate=IMPERSONATE, timeout=45,
+    )
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    tbody = soup.find(id="offTblBdy")
+    if not tbody:
+        return rows
+    for tr in tbody.find_all("tr", recursive=False):
+        cells = tr.find_all("td", recursive=False)
+        if len(cells) < 10:
+            continue
+        text = lambda i: cells[i].get_text(strip=True)
+        rows.append({
+            "exhibit_type": text(1), "file_format": text(2),
+            "file_size": text(3), "title": text(4),
+            "submitted_date": _safe_iso(text(5)),
+            "available_date": _safe_iso(text(9)),
+        })
+    return rows
+
+
 def enrich_record(fcc_id: str, application_id: str) -> dict:
-    """Повертає {'equipment_class', 'device_description', 'documents': [...]}."""
-    result = {"equipment_class": None, "device_description": None, "documents": []}
+    """Returns {'equipment_class', 'device_description', 'documents': [...],
+    'application_info': {...}}."""
+    result = {
+        "equipment_class": None, "device_description": None,
+        "documents": [], "application_info": None,
+    }
 
     try:
-        grant_resp = fcc_requests.get(
-            GRANT_FORM_URL,
-            params={"mode": "COPY", "RequestTimeout": "500", "tcb_code": "",
-                    "application_id": application_id, "fcc_id": fcc_id},
-            impersonate=IMPERSONATE, timeout=45,
-        )
-        grant_resp.raise_for_status()
-        text = re.sub(r"<[^>]+>", " ", grant_resp.text)
-        text = html.unescape(text)
-        text = re.sub(r"[ \t]+", " ", text)
-
-        m = re.search(r"Equipment\s*Class:\s*([^\n]+?)\s*Notes:", text, re.S)
-        if m:
-            result["equipment_class"] = m.group(1).strip()
-
-        m = re.search(r"Notes:\s*([^\n]+?)\s*Grant Notes", text, re.S)
-        if m:
-            note = m.group(1).strip()
-            if note:
-                result["device_description"] = note
+        links_by_title = _fetch_exhibit_links(fcc_id, application_id)
+        summary_rows = _fetch_exhibit_summary(fcc_id, application_id)
+        for row in summary_rows:
+            link = links_by_title.get(row["title"].lower())
+            result["documents"].append({
+                "attachment_id": link["attachment_id"] if link else None,
+                "title": row["title"],
+                "exhibit_type": row["exhibit_type"],
+                "file_format": row["file_format"],
+                "file_size": row["file_size"],
+                "submitted_date": row["submitted_date"],
+                "available_date": row["available_date"],
+                "download_url": link["download_url"] if link else None,
+            })
     except Exception:
         pass
 
     try:
-        exhibits_resp = fcc_requests.get(
-            EXHIBITS_URL,
-            params={"mode": "Exhibits", "RequestTimeout": "500", "calledFromFrame": "N",
-                    "application_id": application_id, "fcc_id": fcc_id},
+        form_resp = fcc_requests.get(
+            FORM731_URL,
+            params={"applicationId": application_id, "fcc_id": fcc_id},
             impersonate=IMPERSONATE, timeout=45,
         )
-        exhibits_resp.raise_for_status()
-        soup = BeautifulSoup(exhibits_resp.text, "html.parser")
-        tbody = soup.find(id="offTblBdy")
-        if tbody:
-            for tr in tbody.find_all("tr", recursive=False):
-                cells = tr.find_all("td", recursive=False)
-                if len(cells) < 6:
-                    continue
-                link = cells[1].find("a")
-                if not link or not link.get("href"):
-                    continue
-                m = re.search(r"[?&]id=(\d+)", link["href"])
-                if not m:
-                    continue
-                result["documents"].append({
-                    "attachment_id": m.group(1),
-                    "title": link.get_text(strip=True),
-                    "exhibit_type": cells[2].get_text(strip=True),
-                    "submitted_date": _safe_iso(cells[3].get_text(strip=True)),
-                    "file_format": cells[4].get_text(strip=True),
-                    "available_date": _safe_iso(cells[5].get_text(strip=True)),
-                    "download_url": "https://apps.fcc.gov" + link["href"] if link["href"].startswith("/") else link["href"],
-                })
+        form_resp.raise_for_status()
+        info = form731.parse_application_info(form_resp.text)
+        result["application_info"] = info
+        result["equipment_class"] = info.get("equipment_class") or None
+        result["device_description"] = info.get("device_description") or None
     except Exception:
         pass
 
@@ -304,6 +353,7 @@ def scan_range(d_from: date, d_to: date, enrich: bool, sleep_between: float = 0.
             rec["equipment_class"] = extra["equipment_class"]
             rec["device_description"] = extra["device_description"]
             rec["documents"] = extra["documents"]
+            rec["application_info"] = extra["application_info"]
             time.sleep(sleep_between)
 
     return records
