@@ -1,0 +1,77 @@
+name: FCC EAS Scan
+
+on:
+  schedule:
+    # 06:00 UTC щодня — забирає вчорашній день (FCC оновлює grant-дані впродовж дня)
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      date_from:
+        description: "Від дати (YYYY-MM-DD), пусто = вчора"
+        required: false
+      date_to:
+        description: "До дати (YYYY-MM-DD), пусто = вчора"
+        required: false
+      scan_type:
+        description: "Тип скану"
+        required: false
+        default: "manual"
+        type: choice
+        options: [daily, historical, manual]
+      enrich:
+        description: "Тягнути Equipment Class/Description + документи"
+        required: false
+        default: true
+        type: boolean
+  repository_dispatch:
+    types: [fcc_scan]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Resolve date range and scan type
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "date_from=${{ github.event.client_payload.date_from }}" >> "$GITHUB_OUTPUT"
+            echo "date_to=${{ github.event.client_payload.date_to }}" >> "$GITHUB_OUTPUT"
+            echo "scan_type=${{ github.event.client_payload.scan_type }}" >> "$GITHUB_OUTPUT"
+            echo "enrich=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            YDAY=$(date -u -d 'yesterday' +%F)
+            echo "date_from=${{ github.event.inputs.date_from }}" >> "$GITHUB_OUTPUT"
+            echo "date_to=${{ github.event.inputs.date_to }}" >> "$GITHUB_OUTPUT"
+            [ -z "${{ github.event.inputs.date_from }}" ] && echo "date_from=$YDAY" >> "$GITHUB_OUTPUT"
+            [ -z "${{ github.event.inputs.date_to }}" ] && echo "date_to=$YDAY" >> "$GITHUB_OUTPUT"
+            echo "scan_type=${{ github.event.inputs.scan_type }}" >> "$GITHUB_OUTPUT"
+            echo "enrich=${{ github.event.inputs.enrich }}" >> "$GITHUB_OUTPUT"
+          else
+            YDAY=$(date -u -d 'yesterday' +%F)
+            echo "date_from=$YDAY" >> "$GITHUB_OUTPUT"
+            echo "date_to=$YDAY" >> "$GITHUB_OUTPUT"
+            echo "scan_type=daily" >> "$GITHUB_OUTPUT"
+            echo "enrich=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run scan
+        env:
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+        run: |
+          ARGS="--date-from ${{ steps.vars.outputs.date_from }} --date-to ${{ steps.vars.outputs.date_to }} --scan-type ${{ steps.vars.outputs.scan_type }}"
+          if [ "${{ steps.vars.outputs.enrich }}" = "true" ]; then
+            ARGS="$ARGS --enrich"
+          fi
+          python fetch_fcc.py $ARGS
