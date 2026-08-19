@@ -1,0 +1,26 @@
+name: FCC Historical Backfill
+
+# Один "тік" = один день. Скрипт сам питає WP (enabled? який рік? яка
+# найраніша дата вже є?) і або сканує рівно один день, або миттєво виходить,
+# якщо бекфіл вимкнено/завершено — тому часті прогони дешеві, поки бекфіл
+# не активний. Керується вимикачем "Enable backfill cron" в адмінці
+# (FCC Import -> Scan -> Historical backfill), не редагуванням цього файлу.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python fetch_fcc.py --backfill
+        env:
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_API_KEY: ${{ secrets.WP_API_KEY }}

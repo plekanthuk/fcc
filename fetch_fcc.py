@@ -300,7 +300,7 @@ def enrich_record(fcc_id: str, application_id: str) -> dict:
         grant_resp.raise_for_status()
         if result["application_info"] is None:
             result["application_info"] = {}
-        result["application_info"]["grant_text"] = form731.parse_grant_text(grant_resp.text)
+        result["application_info"]["grant_html"] = form731.parse_grant_html(grant_resp.text)
     except Exception as e:
         print(f"[enrich] {fcc_id} grant text failed: {type(e).__name__}: {e}", file=sys.stderr)
 
@@ -350,6 +350,21 @@ def push_to_wp(wp_url: str, api_key: str,
     return resp.json()
 
 
+def _wp_headers(api_key: str) -> dict:
+    return {
+        "X-FCC-Api-Key": api_key,
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+    }
+
+
+def get_backfill_status(wp_url: str, api_key: str) -> dict:
+    endpoint = wp_url.rstrip("/") + "/?rest_route=/fcc/v1/backfill-status"
+    resp = wp_requests.get(endpoint, headers=_wp_headers(api_key), timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
 # ---------------------------------------------------------------------------
 # Оркестрація одного діапазону дат
 # ---------------------------------------------------------------------------
@@ -391,21 +406,63 @@ def month_chunks(d_from: date, d_to: date):
             cur = date(cur.year, cur.month + 1, 1)
 
 
+def run_backfill_tick(wp_url: str, wp_api_key: str) -> None:
+    """Один 'тік' історичного бекфілу: сканує РІВНО один день (учора від
+    найранішої дати вже в базі) і завершується. Викликається кроном раз на
+    10 хв (.github/workflows/backfill.yml) — це навмисно один короткий,
+    ідемпотентний запуск замість одного величезного багатогодинного job."""
+    status = get_backfill_status(wp_url, wp_api_key)
+
+    if not status.get("enabled"):
+        print("[backfill] disabled in WP settings, skipping", file=sys.stderr)
+        return
+
+    earliest = status.get("earliest_scanned_date")
+    start_year = int(status.get("start_year") or (date.today().year - 5))
+    target = date(start_year, 1, 1)
+
+    if earliest:
+        next_day = date.fromisoformat(earliest) - timedelta(days=1)
+    else:
+        next_day = date.today() - timedelta(days=1)
+
+    if next_day < target:
+        print(f"[backfill] reached target year {start_year}, nothing to do", file=sys.stderr)
+        return
+
+    print(f"[backfill] scanning {next_day} (target: {target})", file=sys.stderr)
+    records = scan_range(next_day, next_day, enrich=True)
+    print(f"[backfill]   {len(records)} unique records", file=sys.stderr)
+
+    result = push_to_wp(wp_url, wp_api_key, "historical", next_day.isoformat(), next_day.isoformat(), records)
+    print(f"[backfill]   -> {result.get('counts')}", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(description="FCC EAS scanner -> WordPress push")
-    parser.add_argument("--date-from", required=True, type=date.fromisoformat)
-    parser.add_argument("--date-to", required=True, type=date.fromisoformat)
+    parser.add_argument("--date-from", type=date.fromisoformat)
+    parser.add_argument("--date-to", type=date.fromisoformat)
     parser.add_argument("--scan-type", default="manual", choices=["daily", "historical", "manual"])
     parser.add_argument("--enrich", action="store_true",
                          help="Тягнути Equipment Class/Description + список документів (повільніше)")
     parser.add_argument("--scan-request-id", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true", help="Не пушити в WP, лише показати кількість")
+    parser.add_argument("--backfill", action="store_true",
+                         help="Один тік історичного бекфілу (керується налаштуваннями у WP), ігнорує --date-from/to")
     args = parser.parse_args()
 
     wp_url = os.environ.get("WP_URL")
     wp_api_key = os.environ.get("WP_API_KEY")
     if not args.dry_run and not all([wp_url, wp_api_key]):
         print("ERROR: потрібні env WP_URL, WP_API_KEY (або --dry-run)", file=sys.stderr)
+        sys.exit(1)
+
+    if args.backfill:
+        run_backfill_tick(wp_url, wp_api_key)
+        return
+
+    if not args.date_from or not args.date_to:
+        print("ERROR: потрібні --date-from і --date-to (або --backfill)", file=sys.stderr)
         sys.exit(1)
 
     is_multi_month = (args.date_to.year, args.date_to.month) != (args.date_from.year, args.date_from.month)

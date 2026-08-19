@@ -102,19 +102,27 @@ def parse_application_info(text):
     return info
 
 
-def parse_grant_text(html_text):
-    """Tcb731GrantForm.cfm?mode=COPY -> the rendered grant certificate,
-    matching fccid.io's "Grants" section. Returns cleaned plain text
-    (line breaks preserved, tags stripped)."""
+def parse_grant_html(html_text):
+    """Tcb731GrantForm.cfm?mode=COPY -> the certificate's own HTML tables,
+    stripped of scripts/tracking/print-button chrome, for direct (sanitized)
+    rendering. Matches how fccid.io mirrors FCC's own grant markup as a
+    table instead of flattening it to plain text."""
     m = re.search(r'<body[^>]*>(.*?)</body>', html_text, re.S | re.I)
     body = m.group(1) if m else html_text
-    body = re.sub(r'<script.*?</script>', ' ', body, flags=re.S | re.I)
-    body = re.sub(r'<style.*?</style>', ' ', body, flags=re.S | re.I)
-    body = re.sub(r'<(br|/tr|/p|/div)[^>]*>', '\n', body, flags=re.I)
-    body = html.unescape(re.sub(r'<[^>]+>', ' ', body))
-    lines = [re.sub(r'[ \t]+', ' ', ln).strip() for ln in body.splitlines()]
-    lines = [ln for ln in lines if ln]
-    return '\n'.join(lines)
+    # Drop everything from the tracking pixel/noscript onward.
+    body = re.split(r'<noscript', body, flags=re.I)[0]
+    # Drop the "Printer friendly version" toolbar (first table; contains a <form>).
+    body = re.sub(r'<table[^>]*>\s*<tr>\s*<td[^>]*>\s*<form.*?</form>\s*</td>\s*</tr>\s*</table>',
+                   '', body, flags=re.S | re.I)
+    body = re.sub(r'<script.*?</script>', '', body, flags=re.S | re.I)
+    body = re.sub(r'<style.*?</style>', '', body, flags=re.S | re.I)
+    body = re.sub(r'<link[^>]*>', '', body, flags=re.I)
+    body = re.sub(r'<!--.*?-->', '', body, flags=re.S)
+    body = re.sub(r'<div[^>]*class="warning-msg"[^>]*>.*?</div>\s*</div>', '', body, flags=re.S | re.I)
+    # Strip attributes that reference FCC's own stylesheet/layout; keep bare
+    # table/tr/td/strong/br structure so our own CSS can style it.
+    body = re.sub(r'\s+(class|style|bgcolor|background|width|border|cols|align|valign)="[^"]*"', '', body, flags=re.I)
+    return body.strip()
 
 
 if __name__ == '__main__':
