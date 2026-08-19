@@ -23,7 +23,7 @@ import re
 import sys
 import time
 from calendar import monthrange
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import unquote
 
 import requests as wp_requests
@@ -320,7 +320,8 @@ def _safe_iso(mmddyyyy: str):
 
 def push_to_wp(wp_url: str, api_key: str,
                 scan_type: str, date_from: str, date_to: str,
-                records: list[dict], scan_request_id: int | None = None) -> dict:
+                records: list[dict], scan_request_id: int | None = None,
+                started_at: str | None = None) -> dict:
     # ?rest_route=... замість /wp-json/..., бо REST-запис /wp-json/ вимагає
     # активних "pretty permalinks" у WP, а на цільовому сайті вони вимкнені
     # (без цього шлях повертає 404 від самого веб-сервера, ще до WP).
@@ -337,6 +338,11 @@ def push_to_wp(wp_url: str, api_key: str,
     }
     if scan_request_id:
         payload["scan_request_id"] = scan_request_id
+    if started_at:
+        # Коли ЦЕЙ python-процес почав тягнути дані з FCC (UTC ISO 8601) —
+        # щоб лог у WP показував реальну тривалість сканування, а не лише
+        # час на upsert у БД під час цього POST-запиту.
+        payload["started_at"] = started_at
 
     # nginx на цьому хостингу блокує запити з UA "python-requests" (403
     # ще до PHP) — тому видаємо себе за звичайний браузер.
@@ -431,10 +437,12 @@ def run_backfill_tick(wp_url: str, wp_api_key: str) -> None:
         return
 
     print(f"[backfill] scanning {next_day} (target: {target})", file=sys.stderr)
+    started_at = datetime.now(timezone.utc).isoformat()
     records = scan_range(next_day, next_day, enrich=True)
     print(f"[backfill]   {len(records)} unique records", file=sys.stderr)
 
-    result = push_to_wp(wp_url, wp_api_key, "historical", next_day.isoformat(), next_day.isoformat(), records)
+    result = push_to_wp(wp_url, wp_api_key, "historical", next_day.isoformat(), next_day.isoformat(),
+                         records, started_at=started_at)
     print(f"[backfill]   -> {result.get('counts')}", file=sys.stderr)
 
 
@@ -472,6 +480,7 @@ def main():
 
     for chunk_start, chunk_end in chunks:
         print(f"[scan] {chunk_start} .. {chunk_end}", file=sys.stderr)
+        chunk_started_at = datetime.now(timezone.utc).isoformat()
         records = scan_range(chunk_start, chunk_end, enrich=args.enrich)
         print(f"[scan]   {len(records)} унікальних записів", file=sys.stderr)
 
@@ -481,7 +490,7 @@ def main():
         result = push_to_wp(
             wp_url, wp_api_key,
             args.scan_type, chunk_start.isoformat(), chunk_end.isoformat(),
-            records, scan_request_id=args.scan_request_id,
+            records, scan_request_id=args.scan_request_id, started_at=chunk_started_at,
         )
         counts = result.get("counts", {})
         total_new += counts.get("new", 0)
