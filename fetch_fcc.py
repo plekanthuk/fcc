@@ -271,8 +271,8 @@ def enrich_record(fcc_id: str, application_id: str) -> dict:
                 "available_date": row["available_date"],
                 "download_url": link["download_url"] if link else None,
             })
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[enrich] {fcc_id} documents failed: {type(e).__name__}: {e}", file=sys.stderr)
 
     try:
         form_resp = fcc_requests.get(
@@ -285,8 +285,8 @@ def enrich_record(fcc_id: str, application_id: str) -> dict:
         result["application_info"] = info
         result["equipment_class"] = info.get("equipment_class") or None
         result["device_description"] = info.get("device_description") or None
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[enrich] {fcc_id} form731 failed: {type(e).__name__}: {e}", file=sys.stderr)
 
     return result
 
@@ -346,7 +346,8 @@ def scan_range(d_from: date, d_to: date, enrich: bool, sleep_between: float = 0.
     records = list(grouped.values())
 
     if enrich:
-        for rec in records:
+        t0 = time.time()
+        for i, rec in enumerate(records):
             if not rec.get("application_id"):
                 continue
             extra = enrich_record(rec["fcc_id"], rec["application_id"])
@@ -355,6 +356,8 @@ def scan_range(d_from: date, d_to: date, enrich: bool, sleep_between: float = 0.
             rec["documents"] = extra["documents"]
             rec["application_info"] = extra["application_info"]
             time.sleep(sleep_between)
+            if (i + 1) % 20 == 0:
+                print(f"[enrich] {i + 1}/{len(records)} in {time.time() - t0:.1f}s", file=sys.stderr)
 
     return records
 
