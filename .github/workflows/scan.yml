@@ -67,8 +67,7 @@ jobs:
       - name: Run scan
         env:
           WP_URL: ${{ secrets.WP_URL }}
-          WP_USER: ${{ secrets.WP_USER }}
-          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+          WP_API_KEY: ${{ secrets.WP_API_KEY }}
         run: |
           ARGS="--date-from ${{ steps.vars.outputs.date_from }} --date-to ${{ steps.vars.outputs.date_to }} --scan-type ${{ steps.vars.outputs.scan_type }}"
           if [ "${{ steps.vars.outputs.enrich }}" = "true" ]; then

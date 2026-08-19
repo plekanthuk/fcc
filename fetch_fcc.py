@@ -253,10 +253,17 @@ def _safe_iso(mmddyyyy: str):
 # Пуш у WordPress
 # ---------------------------------------------------------------------------
 
-def push_to_wp(wp_url: str, wp_user: str, wp_app_password: str,
+def push_to_wp(wp_url: str, api_key: str,
                 scan_type: str, date_from: str, date_to: str,
                 records: list[dict], scan_request_id: int | None = None) -> dict:
-    endpoint = wp_url.rstrip("/") + "/wp-json/fcc/v1/import"
+    # ?rest_route=... замість /wp-json/..., бо REST-запис /wp-json/ вимагає
+    # активних "pretty permalinks" у WP, а на цільовому сайті вони вимкнені
+    # (без цього шлях повертає 404 від самого веб-сервера, ще до WP).
+    #
+    # Авторизація через X-FCC-Api-Key, а не WP Application Password:
+    # на цьому хостингу (nginx) заголовок Authorization обрізається
+    # ще до PHP, тому Basic Auth ніколи не доходить.
+    endpoint = wp_url.rstrip("/") + "/?rest_route=/fcc/v1/import"
     payload = {
         "scan_type": scan_type,
         "date_from": date_from,
@@ -267,7 +274,7 @@ def push_to_wp(wp_url: str, wp_user: str, wp_app_password: str,
         payload["scan_request_id"] = scan_request_id
 
     resp = wp_requests.post(
-        endpoint, json=payload, auth=(wp_user, wp_app_password), timeout=120,
+        endpoint, json=payload, headers={"X-FCC-Api-Key": api_key}, timeout=120,
     )
     resp.raise_for_status()
     return resp.json()
@@ -322,10 +329,9 @@ def main():
     args = parser.parse_args()
 
     wp_url = os.environ.get("WP_URL")
-    wp_user = os.environ.get("WP_USER")
-    wp_app_password = os.environ.get("WP_APP_PASSWORD")
-    if not args.dry_run and not all([wp_url, wp_user, wp_app_password]):
-        print("ERROR: потрібні env WP_URL, WP_USER, WP_APP_PASSWORD (або --dry-run)", file=sys.stderr)
+    wp_api_key = os.environ.get("WP_API_KEY")
+    if not args.dry_run and not all([wp_url, wp_api_key]):
+        print("ERROR: потрібні env WP_URL, WP_API_KEY (або --dry-run)", file=sys.stderr)
         sys.exit(1)
 
     is_multi_month = (args.date_to.year, args.date_to.month) != (args.date_from.year, args.date_from.month)
@@ -342,7 +348,7 @@ def main():
             continue
 
         result = push_to_wp(
-            wp_url, wp_user, wp_app_password,
+            wp_url, wp_api_key,
             args.scan_type, chunk_start.isoformat(), chunk_end.isoformat(),
             records, scan_request_id=args.scan_request_id,
         )
