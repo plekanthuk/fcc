@@ -120,10 +120,11 @@ def parse_grant_html(html_text):
     body = re.sub(r'<!--.*?-->', '', body, flags=re.S)
     body = re.sub(r'<div[^>]*class="warning-msg"[^>]*>.*?</div>\s*</div>', '', body, flags=re.S | re.I)
     # Strip attributes tied to FCC's own stylesheet/layout, but KEEP align/
-    # valign/colspan — those carry real layout info (e.g. "TCB" left, title
-    # centered, "TCB" right in the header row) that fccid.io's own mirror
+    # valign/colspan/width — those carry real layout info (e.g. "TCB" left,
+    # title centered, "TCB" right in the header row; the address block is
+    # width=65% align=center, not full width) that fccid.io's own mirror
     # preserves too; our CSS supplies fonts/spacing/borders on top.
-    body = re.sub(r'\s+(class|style|bgcolor|background|width|border|cols)="[^"]*"', '', body, flags=re.I)
+    body = re.sub(r'\s+(class|style|bgcolor|background|border|cols)="[^"]*"', '', body, flags=re.I)
     return body.strip()
 
 
