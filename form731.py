@@ -15,7 +15,8 @@ def get_sections(text):
 
 
 def _clean(raw):
-    return html.unescape(re.sub(r'<[^>]+>', ' ', raw)).strip()
+    text = html.unescape(re.sub(r'<[^>]+>', ' ', raw))
+    return re.sub(r'\s+', ' ', text).strip()
 
 
 def td_value(chunk, label_substr):
