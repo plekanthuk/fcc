@@ -18,6 +18,7 @@ FCC EAS сканер -> надсилає нормалізовані записи
 """
 
 import argparse
+import io
 import os
 import re
 import sys
@@ -36,6 +37,22 @@ SEARCH_URL = "https://apps.fcc.gov/oetcf/eas/reports/GenericSearchResult.cfm?Req
 EXHIBITS_URL = "https://apps.fcc.gov/oetcf/eas/reports/ViewExhibitReport.cfm"
 GRANT_FORM_URL = "https://apps.fcc.gov/oetcf/tcb/reports/Tcb731GrantForm.cfm"
 IMPERSONATE = "chrome"
+
+
+class _Tee:
+    """Дзеркалить print(..., file=sys.stderr) одночасно в реальний stderr
+    (щоб лог і далі був видний у GitHub Actions) і в буфер у пам'яті —
+    цей буфер потім надсилається у WP і показується у вкладці Logs."""
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
 
 BASE_FIELDS = {
     "grantee_code": "", "product_code": "", "applicant_name": "",
@@ -321,7 +338,7 @@ def _safe_iso(mmddyyyy: str):
 def push_to_wp(wp_url: str, api_key: str,
                 scan_type: str, date_from: str, date_to: str,
                 records: list[dict], scan_request_id: int | None = None,
-                started_at: str | None = None) -> dict:
+                started_at: str | None = None, log_text: str | None = None) -> dict:
     # ?rest_route=... замість /wp-json/..., бо REST-запис /wp-json/ вимагає
     # активних "pretty permalinks" у WP, а на цільовому сайті вони вимкнені
     # (без цього шлях повертає 404 від самого веб-сервера, ще до WP).
@@ -343,6 +360,10 @@ def push_to_wp(wp_url: str, api_key: str,
         # щоб лог у WP показував реальну тривалість сканування, а не лише
         # час на upsert у БД під час цього POST-запиту.
         payload["started_at"] = started_at
+    if log_text:
+        # Обрізаємо про всяк випадок, щоб не роздувати LONGTEXT/POST дарма
+        # на дуже великих історичних прогонах.
+        payload["log_text"] = log_text[-200_000:]
 
     # nginx на цьому хостингу блокує запити з UA "python-requests" (403
     # ще до PHP) — тому видаємо себе за звичайний браузер.
@@ -436,14 +457,20 @@ def run_backfill_tick(wp_url: str, wp_api_key: str) -> None:
         print(f"[backfill] reached target year {start_year}, nothing to do", file=sys.stderr)
         return
 
-    print(f"[backfill] scanning {next_day} (target: {target})", file=sys.stderr)
-    started_at = datetime.now(timezone.utc).isoformat()
-    records = scan_range(next_day, next_day, enrich=True)
-    print(f"[backfill]   {len(records)} unique records", file=sys.stderr)
+    log_buffer = io.StringIO()
+    real_stderr = sys.stderr
+    sys.stderr = _Tee(real_stderr, log_buffer)
+    try:
+        print(f"[backfill] scanning {next_day} (target: {target})", file=sys.stderr)
+        started_at = datetime.now(timezone.utc).isoformat()
+        records = scan_range(next_day, next_day, enrich=True)
+        print(f"[backfill]   {len(records)} unique records", file=sys.stderr)
 
-    result = push_to_wp(wp_url, wp_api_key, "historical", next_day.isoformat(), next_day.isoformat(),
-                         records, started_at=started_at)
-    print(f"[backfill]   -> {result.get('counts')}", file=sys.stderr)
+        result = push_to_wp(wp_url, wp_api_key, "historical", next_day.isoformat(), next_day.isoformat(),
+                             records, started_at=started_at, log_text=log_buffer.getvalue())
+        print(f"[backfill]   -> {result.get('counts')}", file=sys.stderr)
+    finally:
+        sys.stderr = real_stderr
 
 
 def main():
@@ -479,19 +506,26 @@ def main():
     total_new = total_changed = total_unchanged = total_errors = 0
 
     for chunk_start, chunk_end in chunks:
-        print(f"[scan] {chunk_start} .. {chunk_end}", file=sys.stderr)
-        chunk_started_at = datetime.now(timezone.utc).isoformat()
-        records = scan_range(chunk_start, chunk_end, enrich=args.enrich)
-        print(f"[scan]   {len(records)} унікальних записів", file=sys.stderr)
+        log_buffer = io.StringIO()
+        real_stderr = sys.stderr
+        sys.stderr = _Tee(real_stderr, log_buffer)
+        try:
+            print(f"[scan] {chunk_start} .. {chunk_end}", file=sys.stderr)
+            chunk_started_at = datetime.now(timezone.utc).isoformat()
+            records = scan_range(chunk_start, chunk_end, enrich=args.enrich)
+            print(f"[scan]   {len(records)} унікальних записів", file=sys.stderr)
 
-        if args.dry_run:
-            continue
+            if args.dry_run:
+                continue
 
-        result = push_to_wp(
-            wp_url, wp_api_key,
-            args.scan_type, chunk_start.isoformat(), chunk_end.isoformat(),
-            records, scan_request_id=args.scan_request_id, started_at=chunk_started_at,
-        )
+            result = push_to_wp(
+                wp_url, wp_api_key,
+                args.scan_type, chunk_start.isoformat(), chunk_end.isoformat(),
+                records, scan_request_id=args.scan_request_id, started_at=chunk_started_at,
+                log_text=log_buffer.getvalue(),
+            )
+        finally:
+            sys.stderr = real_stderr
         counts = result.get("counts", {})
         total_new += counts.get("new", 0)
         total_changed += counts.get("changed", 0)
