@@ -454,7 +454,11 @@ def run_backfill_tick(wp_url: str, wp_api_key: str) -> str:
         print("[backfill] disabled in WP settings, skipping", file=sys.stderr)
         return "disabled"
 
-    earliest = status.get("earliest_scanned_date")
+    # earliest_completed_day is the crash-safe marker (set only after a
+    # whole day's batch finished upserting); earliest_scanned_date is a
+    # looser fallback for continuity on days scanned before that tracking
+    # existed (e.g. via regular daily/manual scans, not the backfill tick).
+    earliest = status.get("earliest_completed_day") or status.get("earliest_scanned_date")
     start_year = int(status.get("start_year") or (date.today().year - 5))
     target = date(start_year, 1, 1)
 
