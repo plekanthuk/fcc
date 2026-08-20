@@ -21,6 +21,19 @@ permissions:
   contents: read
   actions: write
 
+# GitHub runs different workflow_dispatch/schedule triggers of the SAME
+# workflow in PARALLEL by default. Since the self-chain fires a fresh
+# dispatch after every tick, and the hourly schedule / manual runs can land
+# around the same time, two ticks could both read "earliest completed day"
+# before either had written its own — and both pick the SAME day to scan
+# (harmless thanks to idempotent upserts, but wastes a full run). This
+# forces at most one tick at a time; a second trigger queues and starts
+# only after the first commits its result, so it naturally picks the next
+# day instead of repeating one.
+concurrency:
+  group: fcc-backfill
+  cancel-in-progress: false
+
 jobs:
   tick:
     runs-on: ubuntu-latest
