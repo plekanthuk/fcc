@@ -2,13 +2,24 @@ name: FCC Historical Backfill
 
 # Один "тік" = один день. Скрипт сам питає WP (enabled? який рік? яка
 # найраніша дата вже є?) і або сканує рівно один день, або миттєво виходить,
-# якщо бекфіл вимкнено/завершено — тому часті прогони дешеві, поки бекфіл
-# не активний. Керується вимикачем "Enable backfill cron" в адмінці
-# (FCC Import -> Scan -> Historical backfill), не редагуванням цього файлу.
+# якщо бекфіл вимкнено/завершено. Керується вимикачем "Enable backfill cron"
+# в адмінці (FCC Import -> Scan -> Historical backfill), не цим файлом.
+#
+# GitHub Actions' власний `schedule` НЕ надійний для щільного темпу — реально
+# затримує кожен запуск на 20-80+ хв незалежно від заданого cron-інтервалу
+# (задокументована особливість GH Actions при навантаженні). Тому основний
+# драйвер темпу — сам job: після кожного тіку, якщо є що сканувати далі, він
+# одразу перетригерює наступний запуск через API. `schedule` тут лишається
+# лише рідкісною підстраховкою (раз/год) на випадок, якщо ланцюжок обірветься
+# (напр. після невдалого запуску).
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "0 * * * *"
   workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: write
 
 jobs:
   tick:
@@ -20,7 +31,19 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: python fetch_fcc.py --backfill
+
+      - name: Run one backfill tick
+        id: tick
+        run: python fetch_fcc.py --backfill
         env:
           WP_URL: ${{ secrets.WP_URL }}
           WP_API_KEY: ${{ secrets.WP_API_KEY }}
+
+      - name: Chain next tick immediately
+        if: steps.tick.outputs.backfill_status == 'scanned' || steps.tick.outputs.backfill_status == 'error'
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/backfill.yml/dispatches" \
+            -d '{"ref":"${{ github.ref_name }}"}'

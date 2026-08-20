@@ -433,16 +433,26 @@ def month_chunks(d_from: date, d_to: date):
             cur = date(cur.year, cur.month + 1, 1)
 
 
-def run_backfill_tick(wp_url: str, wp_api_key: str) -> None:
+def run_backfill_tick(wp_url: str, wp_api_key: str) -> str:
     """Один 'тік' історичного бекфілу: сканує РІВНО один день (учора від
-    найранішої дати вже в базі) і завершується. Викликається кроном раз на
-    10 хв (.github/workflows/backfill.yml) — це навмисно один короткий,
-    ідемпотентний запуск замість одного величезного багатогодинного job."""
-    status = get_backfill_status(wp_url, wp_api_key)
+    найранішої дати вже в базі) і завершується. GitHub Actions' власний
+    schedule (кожні N хв) НЕ надійний для щільного темпу — реально затримує
+    на 20-80+ хв (задокументована особливість GH Actions), тому основний
+    драйвер — сам workflow (.github/workflows/backfill.yml), що одразу
+    після тіку перетригерює себе через API; schedule лишається лише
+    рідкісною підстраховкою на випадок обриву ланцюжка.
+
+    Повертає 'disabled' | 'done' | 'scanned' | 'error' — workflow вирішує
+    на основі цього, чи запускати наступний тік негайно."""
+    try:
+        status = get_backfill_status(wp_url, wp_api_key)
+    except Exception as e:
+        print(f"[backfill] failed to fetch status: {type(e).__name__}: {e}", file=sys.stderr)
+        return "error"
 
     if not status.get("enabled"):
         print("[backfill] disabled in WP settings, skipping", file=sys.stderr)
-        return
+        return "disabled"
 
     earliest = status.get("earliest_scanned_date")
     start_year = int(status.get("start_year") or (date.today().year - 5))
@@ -455,7 +465,7 @@ def run_backfill_tick(wp_url: str, wp_api_key: str) -> None:
 
     if next_day < target:
         print(f"[backfill] reached target year {start_year}, nothing to do", file=sys.stderr)
-        return
+        return "done"
 
     log_buffer = io.StringIO()
     real_stderr = sys.stderr
@@ -469,6 +479,10 @@ def run_backfill_tick(wp_url: str, wp_api_key: str) -> None:
         result = push_to_wp(wp_url, wp_api_key, "historical", next_day.isoformat(), next_day.isoformat(),
                              records, started_at=started_at, log_text=log_buffer.getvalue())
         print(f"[backfill]   -> {result.get('counts')}", file=sys.stderr)
+        return "scanned"
+    except Exception as e:
+        print(f"[backfill] tick failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return "error"
     finally:
         sys.stderr = real_stderr
 
@@ -493,7 +507,11 @@ def main():
         sys.exit(1)
 
     if args.backfill:
-        run_backfill_tick(wp_url, wp_api_key)
+        status = run_backfill_tick(wp_url, wp_api_key)
+        github_output = os.environ.get("GITHUB_OUTPUT")
+        if github_output:
+            with open(github_output, "a", encoding="utf-8") as f:
+                f.write(f"backfill_status={status}\n")
         return
 
     if not args.date_from or not args.date_to:
